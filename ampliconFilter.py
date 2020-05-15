@@ -24,19 +24,30 @@ import collections
 import datetime, time
 from Pcr import Segment, Segments
 
-def readDesign(fi):
+def readBedPe(fi,genome_fasta):
+    genome = pysam.FastaFile(genome_fasta)
     # create primer and amplicon lists
     # FIELDS
     # chrom start
     F, R = Segments(), Segments()
     with open(fi,'r') as fh:
         for i, line in enumerate(fh):
-            fields = line.split()
-            # Segment(chr, start, index, {(coords), seq})
-            F.sortedInsert(Segment([fields[0].replace('chr',''), int(fields[1])-len(fields[3]), i, \
-                {'coords': (int(fields[1])-len(fields[3]), int(fields[1])), 'seq': fields[3], 'pool': fields[5]} ]))
-            R.sortedInsert(Segment([fields[0].replace('chr',''), int(fields[2])+len(fields[4])+1, i, \
-                {'coords': (int(fields[2])+1, int(fields[2])+len(fields[4])+1), 'seq': fields[4], 'pool': fields[5]} ]))
+            fwd_chrom, fwd_start, fwd_end, rev_chrom, rev_start, rev_end = line.split()
+            # FWD primer
+            fwd_seq = genome.fetch(fwd_chrom, int(fwd_start), int(fwd_end))
+            fwd_segment = Segment([ fwd_chrom, int(fwd_start), i, {
+                'coords': (int(fwd_start), int(fwd_end)),
+                'seq': fwd_seq
+            }])
+            F.sortedInsert(fwd_segment)
+            # REV primer
+            rev_seq = genome.fetch(rev_chrom, int(rev_start), int(rev_end))
+            rev_segment = Segment([ rev_chrom, int(rev_start), i, {
+                'coords': (int(rev_start), int(rev_end)),
+                'seq': revcomp(rev_seq)
+            }])
+            R.sortedInsert(rev_segment)
+    genome.close()
     return F, R
 
 def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskadaptor=True):
@@ -156,14 +167,14 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
             assert len(newseq) == len(alnread.seq) and \
                 len(newqual) == len(alnread.qual)
     except:
-        print >> sys.stderr, alnread.seq
-        print >> sys.stderr, newseq
-        print >> sys.stderr, alnread.qual
-        print >> sys.stderr, newqual
-        print >> sys.stderr, alnread.cigar
-        print >> sys.stderr, newcigartuples
-        print >> sys.stderr, alnread.pos
-        print >> sys.stderr, newpos
+        print(alnread.seq, file=sys.stderr)
+        print(newseq, file=sys.stderr)
+        print(alnread.qual, file=sys.stderr)
+        print(newqual, file=sys.stderr)
+        print(alnread.cigar, file=sys.stderr)
+        print(newcigartuples, file=sys.stderr)
+        print(alnread.pos, file=sys.stderr)
+        print(newpos, file=sys.stderr)
         raise
 
     # update and print
@@ -174,9 +185,9 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
     try:
         ofh.write(alnread)
     except:
-        print >> sys.stderr, alnread.qname, alnread.cigarstring, len(alnread.seq), len(alnread.qual)
-        print >> sys.stderr, lprimer, leftprimerstart, leftprimerend
-        print >> sys.stderr, rprimer, riteprimerstart, riteprimerend
+        print(alnread.qname, alnread.cigarstring, len(alnread.seq), len(alnread.qual), file=sys.stderr)
+        print(lprimer, leftprimerstart, leftprimerend, file=sys.stderr)
+        print(rprimer, riteprimerstart, riteprimerend, file=sys.stderr)
         raise
     return
 
@@ -185,7 +196,6 @@ matchstring = lambda x,y: ''.join(['*' if n == y[i] else "-" for i,n in enumerat
 
 '''reverse complement'''
 revcomp = lambda x: ''.join([{'A':'T','C':'G','G':'C','T':'A'}[B] for B in x][::-1])
-
 
 '''main'''
 if __name__=="__main__":
@@ -199,6 +209,7 @@ if __name__=="__main__":
     parser.add_argument('-i','--inputfile', metavar='FILE', help='inputfile (Default: SAM to STDIN)', type=str)
     parser.add_argument('-o','--outputfile', metavar='FILE', help='outputfile (Default: SAM to STDOUT)', type=str)
     parser.add_argument('-d','--discarded', metavar='FILE', help='discarded fragment output', type=str)
+    parser.add_argument('-g','--genome', metavar='FILE', help='The indexed genome FASTA file', type=str)
 
     # other options
     parser.add_argument('--se', help='Analysis for single ended data', action="store_true", default=False)
@@ -218,9 +229,13 @@ if __name__=="__main__":
         primermask = [[],['!','!','!','!']]
 
     # read design file and create primer libraries (Forward and Reverse)
-    print >> sys.stderr, "Reading design file...",
-    fwd, rev = readDesign(args.designfile)
-    print >> sys.stderr, "\rRead design from %s" % args.designfile
+    print("Reading design file...", end=' ', file=sys.stderr)
+    fwd, rev = readBedPe(args.designfile,args.genome)
+    print("\rRead design from %s" % args.designfile, file=sys.stderr)
+
+
+    raise NotImplementedError
+
 
     # open input
     if args.inputfile:
@@ -310,7 +325,7 @@ if __name__=="__main__":
             pass  # don't print anything supplementary
 
         # buffer and resolve (PairedEnd)
-        elif aln.is_proper_pair and aln.qname in alnbuffer.keys():  # found mate -> print
+        elif aln.is_proper_pair and aln.qname in list(alnbuffer.keys()):  # found mate -> print
             # get left right end
             if alnbuffer[aln.qname].is_reverse and not aln.is_reverse:
                 firstseg = aln
@@ -319,7 +334,7 @@ if __name__=="__main__":
                 firstseg = alnbuffer[aln.qname]
                 lastseg = aln
             else:
-                print >> sys.stderr, aln.flag
+                print(aln.flag, file=sys.stderr)
                 raise Exception("ParanoiaGotReal")
             # get ends
             l = Segment((infile.getrname(firstseg.rname), firstseg.pos+args.tolerance-1))
@@ -419,7 +434,7 @@ if __name__=="__main__":
 
         ## check buffer size
         if len(alnbuffer) > args.maxbuffer:
-            print >> sys.stderr, "ERROR: Buffer overflow (%d)" % args.maxbuffer
+            print("ERROR: Buffer overflow (%d)" % args.maxbuffer, file=sys.stderr)
             raise Exception("BufferOverflow")
 
 
@@ -428,14 +443,14 @@ if __name__=="__main__":
         discfile.close()
     outfile.close()
     infile.close()
-    print >> sys.stderr, '[DONE]'
+    print('[DONE]', file=sys.stderr)
 
     # check if all printed as pairs
     try:
         assert len(alnbuffer) == 0
     except:
-        print >> sys.stderr, "Could not find all mate pairs! Missed ", len(alnbuffer.keys())
-        print >> sys.stderr, "First 50 mate-less mappings:\n", '\n'.join(alnbuffer.keys()[:50])
+        print("Could not find all mate pairs! Missed ", len(list(alnbuffer.keys())), file=sys.stderr)
+        print("First 50 mate-less mappings:\n", '\n'.join(list(alnbuffer.keys())[:50]), file=sys.stderr)
         #raise Exception("TruncatedInput")
 
     # summary statistics
@@ -454,19 +469,19 @@ if __name__=="__main__":
 
     # print the metrics
     outfh = open(args.metrics,'w') if args.metrics else sys.stderr
-    print >> outfh, "## custom.ampliconfilter.metrics"
-    print >> outfh, "#", ' '.join(sys.argv)
-    print >> outfh, "## custom.ampliconfilter.metrics"
-    print >> outfh, "# Started on:", datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
-    print >> outfh, "\n# FILTER METRICS"
-    print >> outfh, '\t'.join(stats.keys())
-    print >> outfh, '\t'.join(stats.values())
-    print >> outfh, "\n# PRIMER METRICS"
-    print >> outfh, '\t'.join(['seqend','stat','len','count'])
+    print("## custom.ampliconfilter.metrics", file=outfh)
+    print("#", ' '.join(sys.argv), file=outfh)
+    print("## custom.ampliconfilter.metrics", file=outfh)
+    print("# Started on:", datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S'), file=outfh)
+    print("\n# FILTER METRICS", file=outfh)
+    print('\t'.join(list(stats.keys())), file=outfh)
+    print('\t'.join(list(stats.values())), file=outfh)
+    print("\n# PRIMER METRICS", file=outfh)
+    print('\t'.join(['seqend','stat','len','count']), file=outfh)
     for end in sorted(gstat.keys()):
         for stat in sorted(gstat[end].keys()):
             for length in sorted(gstat[end][stat].keys()):
-                print >> outfh, '\t'.join(map(str,[end,stat,length,gstat[end][stat][length]]))
-    print >> outfh  # add empty line
+                print('\t'.join(map(str,[end,stat,length,gstat[end][stat][length]])), file=outfh)
+    print(file=outfh)  # add empty line
     if args.metrics:
         outfh.close()
