@@ -32,17 +32,21 @@ def readBedPe(fi,genome_fasta):
     F, R = Segments(), Segments()
     with open(fi,'r') as fh:
         for i, line in enumerate(fh):
+            # ckip commented lines
+            if line.startswith('#'):
+                continue
+            # get fields
             fwd_chrom, fwd_start, fwd_end, rev_chrom, rev_start, rev_end = line.split()
-            # FWD primer
+            # FWD primer (index the leftmost position)
             fwd_seq = genome.fetch(fwd_chrom, int(fwd_start), int(fwd_end))
             fwd_segment = Segment([ fwd_chrom, int(fwd_start), i, {
                 'coords': (int(fwd_start), int(fwd_end)),
                 'seq': fwd_seq
             }])
             F.sortedInsert(fwd_segment)
-            # REV primer
+            # REV primer (index the rightmost position)
             rev_seq = genome.fetch(rev_chrom, int(rev_start), int(rev_end))
-            rev_segment = Segment([ rev_chrom, int(rev_start), i, {
+            rev_segment = Segment([ rev_chrom, int(rev_end), i, {
                 'coords': (int(rev_start), int(rev_end)),
                 'seq': revcomp(rev_seq)
             }])
@@ -197,6 +201,19 @@ matchstring = lambda x,y: ''.join(['*' if n == y[i] else "-" for i,n in enumerat
 '''reverse complement'''
 revcomp = lambda x: ''.join([{'A':'T','C':'G','G':'C','T':'A'}[B] for B in x][::-1])
 
+'''is "properly" paired (correct reference and orientation)'''
+def is_paired(aln):
+    return aln.is_paired and aln.is_reverse != aln.mate_is_reverse
+    # return aln.is_proper_pair and aln.is_reverse != aln.mate_is_reverse
+
+'''get matching primers from a list'''
+def get_matched(le,ri):
+    for l in le:
+        for r in ri:
+            if l[2] == r[2]:
+                return l, r
+    return None, None
+
 '''main'''
 if __name__=="__main__":
     # timestamp
@@ -212,7 +229,7 @@ if __name__=="__main__":
     parser.add_argument('-g','--genome', metavar='FILE', help='The indexed genome FASTA file', type=str)
 
     # other options
-    parser.add_argument('--se', help='Analysis for single ended data', action="store_true", default=False)
+    parser.add_argument('--super', help='Allows all primer combinations', action="store_true", default=False)
     parser.add_argument('--mask', help='Sequence hardmasking (Default: False)', action="store_true", default=False)
     parser.add_argument('--clipping', help='Primer clipping [0] noclip, [1] softclip, [2] hardclip (Default: 0)', type=int, default=0)
     parser.add_argument('--primerdistance', metavar='INT', help='maximum distance from nearest possible primer [0]', type=int, default=0)
@@ -232,10 +249,6 @@ if __name__=="__main__":
     print("Reading design file...", end=' ', file=sys.stderr)
     fwd, rev = readBedPe(args.designfile,args.genome)
     print("\rRead design from %s" % args.designfile, file=sys.stderr)
-
-
-    raise NotImplementedError
-
 
     # open input
     if args.inputfile:
@@ -292,6 +305,7 @@ if __name__=="__main__":
                 except:
                     pass
                 discfile.write(aln)
+            pass  # don't print any singletons
         elif aln.is_unmapped:  # -M or --
             if discfile:
                 try:
@@ -299,6 +313,7 @@ if __name__=="__main__":
                 except:
                     pass
                 discfile.write(aln)
+            pass  # don't print anything unmapped
         elif aln.is_qcfail:
             if discfile:
                 try:
@@ -323,9 +338,8 @@ if __name__=="__main__":
                     pass
                 discfile.write(aln)
             pass  # don't print anything supplementary
-
         # buffer and resolve (PairedEnd)
-        elif aln.is_proper_pair and aln.qname in list(alnbuffer.keys()):  # found mate -> print
+        elif is_paired(aln) and aln.qname in list(alnbuffer.keys()):  # found mate -> print
             # get left right end
             if alnbuffer[aln.qname].is_reverse and not aln.is_reverse:
                 firstseg = aln
@@ -337,15 +351,19 @@ if __name__=="__main__":
                 print(aln.flag, file=sys.stderr)
                 raise Exception("ParanoiaGotReal")
             # get ends
-            l = Segment((infile.getrname(firstseg.rname), firstseg.pos+args.tolerance-1))
-            r = Segment((infile.getrname(lastseg.rname), lastseg.pos+lastseg.alen-args.tolerance+1))
+            pair_start = firstseg.reference_start + args.tolerance + 1
+            pair_end = lastseg.reference_end - args.tolerance - 1
+            l = Segment((infile.getrname(firstseg.rname), pair_start))
+            r = Segment((infile.getrname(lastseg.rname), pair_end))
             # find primers
             try:
-                left = fwd.find_le(l)
-                rite = rev.find_ge(r)
-                assert left[0] == rite[0]
+                lefts = fwd.find_all_le(l)
+                rites = rev.find_all_ge(r)
+                left, rite = (lefts[0], rites[0]) if args.super else get_matched(lefts,rites)
+                assert left and rite  # found a matching pair
+                assert left[0] == rite[0]  # references match
                 assert l[1] - left[3]['coords'][1] < args.primerdistance and rite[3]['coords'][0] - r[1] < args.primerdistance
-            except (ValueError, AssertionError):  # no primer found or on different chromosomes
+            except (ValueError, AssertionError, TypeError):  # no primer found or on different chromosomes
                 fragment['ectopic'] += 1
                 if discfile:
                     try:
@@ -379,50 +397,13 @@ if __name__=="__main__":
                     printClipped(outfile, lastseg,  (left, rite), gstat, args.extratrim, primermask, args.clipping)
             # cleanup buffer
             del alnbuffer[aln.qname]
-        elif aln.is_proper_pair and aln.is_reverse != aln.mate_is_reverse:
+        elif is_paired(aln):
             # buffer segment
             alnbuffer[aln.qname] = aln
 
         # not proper pair (both mapped or SingleEnd)
         elif not aln.mate_is_unmapped:  # BOTH MAPPED NOT PROPERLY PAIRED
-            if args.se:  # resolve (SingleEnd) have no tag except reverse
-                # get ends
-                l = Segment((infile.getrname(aln.rname), aln.pos+args.tolerance-1))
-                r = Segment((infile.getrname(aln.rname), aln.pos+aln.alen-args.tolerance+1))
-                # find primers
-                try:
-                    left = fwd.find_le(l)
-                    rite = rev.find_ge(r)
-                    assert left[0] == rite[0]
-                    assert l[1] - left[3]['coords'][1] < args.primerdistance and rite[3]['coords'][0] - r[1] < args.primerdistance
-                except (ValueError, AssertionError):  # no primer found or on different chromosomes
-                    fragment['ectopic'] += 1
-                    if discfile:
-                        try:
-                            if left[0] == rite[0]:
-                                aln.set_tag('af', ':'.join(['ectopic',str(left[1]),str(rite[1])]), replace=True)
-                            else:
-                                aln.set_tag('af', 'primerdistance', replace=True)
-                        except:
-                            pass
-                        discfile.write(aln)
-                except:
-                    raise
-                else:
-                    # get relative primer position
-                    if left[2] != rite[2]:  # chimera
-                        fragment['chimera'] += 1
-                        if discfile:
-                            try:
-                                aln.set_tag('af', 'chimera', replace=True)
-                            except:
-                                pass
-                            discfile.write(aln)
-                    else:  # good amplicon
-                        fragment['designed'] += 1
-                        printClipped(outfile, aln, (left, rite), gstat, args.extratrim, primermask, args.clipping)
-                # no buffer cleanup as singe end are unbuffered
-            elif discfile:  # no proper pair flag
+            if discfile:  # no proper pair flag
                 try:
                     aln.set_tag('af', 'notproper', replace=True)
                 except:
