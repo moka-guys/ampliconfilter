@@ -186,6 +186,12 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
     alnread.qual = newqual
     alnread.cigartuples = newcigartuples
     alnread.pos = newpos
+    # add primer names to tag
+    try:
+        alnread.set_tag('xp', f'{primers[0][2]}|{primers[1][2]}', replace=True)
+    except:
+        pass
+    # write read
     try:
         ofh.write(alnread)
     except:
@@ -296,7 +302,7 @@ if __name__=="__main__":
                 sys.stderr.write(str(i/1000)+'k')
             else:
                 sys.stderr.write('.')
-
+            sys.stderr.flush()
         # filter singletons,unmapped,qcfail,seconday,supplementary
         if not aln.is_unmapped and aln.mate_is_unmapped:  # M-
             if discfile:
@@ -380,21 +386,27 @@ if __name__=="__main__":
             except:
                 raise
             else:
-                # get relative primer position
-                if left[2] != rite[2]:  # chimera
+                # tag fragment
+                if left[2] != rite[2]:
+                    # chimera to discard
                     fragment['chimera'] += 1
-                    if discfile:
-                        try:
-                            firstseg.set_tag('af', 'chimera', replace=True)
-                            lastseg.set_tag('af', 'chimera', replace=True)
-                        except:
-                            pass
-                        discfile.write(firstseg)
-                        discfile.write(lastseg)
-                else:  # good amplicon
+                    try:
+                        firstseg.set_tag('af', 'chimera', replace=True)
+                        lastseg.set_tag('af', 'chimera', replace=True)
+                    except:
+                        pass
+                else:
+                    # expected amplicon
                     fragment['designed'] += 1
+
+                # write file
+                if args.super or left[2] == rite[2]:
                     printClipped(outfile, firstseg, (left, rite), gstat, args.extratrim, primermask, args.clipping)
                     printClipped(outfile, lastseg,  (left, rite), gstat, args.extratrim, primermask, args.clipping)
+                else:
+                    if discfile:
+                        discfile.write(firstseg)
+                        discfile.write(lastseg)
             # cleanup buffer
             del alnbuffer[aln.qname]
         elif is_paired(aln):
