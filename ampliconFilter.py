@@ -171,6 +171,7 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
             assert len(newseq) == len(alnread.seq) and \
                 len(newqual) == len(alnread.qual)
     except:
+        print(alnread, file=sys.stderr)
         print(alnread.seq, file=sys.stderr)
         print(newseq, file=sys.stderr)
         print(alnread.qual, file=sys.stderr)
@@ -220,6 +221,26 @@ def get_matched(le,ri):
                 return l, r
     return None, None
 
+'''BAM/SAM I/O'''
+def bamIO(name, mode, stream=False, template=None):
+    if name:
+        extension = name[name.rfind('.'):]
+        if extension == '.bam':
+            return pysam.Samfile(name, '{}b'.format(mode), template=template)
+        elif extension == '.sam':
+            return pysam.Samfile(name, '{}'.format(mode), template=template)
+        else:
+            raise Exception('UnkownInputFormat')
+    else:
+        return pysam.Samfile("-",'{}'.format(mode), template=template) if stream else None
+
+'''checks if primers overlap'''
+def primersOverlap(l,r):
+    return l[3]['coords'][1] > r[3]['coords'][0]
+
+def expectedPrimerPair(l,r):
+    return l[2] == r[2]
+
 '''main'''
 if __name__=="__main__":
     # timestamp
@@ -257,37 +278,13 @@ if __name__=="__main__":
     print("\rRead design from %s" % args.designfile, file=sys.stderr)
 
     # open input
-    if args.inputfile:
-        if args.inputfile[args.inputfile.rfind('.'):] == '.bam':
-            infile = pysam.Samfile(args.inputfile,'rb')
-        elif args.inputfile[args.inputfile.rfind('.'):] == '.sam':
-            infile = pysam.Samfile(args.inputfile,'r')
-        else:
-            raise Exception('UnkownInputFormat')
-    else:
-        infile = pysam.Samfile("-",'r')
+    infile = bamIO(args.inputfile, 'r', True)
 
     # open output
-    if args.outputfile:
-        if args.outputfile[args.outputfile.rfind('.'):] == '.bam':
-            outfile = pysam.Samfile(args.outputfile, 'wb', template = infile )
-        elif args.outputfile[args.outputfile.rfind('.'):] == '.sam':
-            outfile = pysam.Samfile(args.outputfile, 'w', template = infile )
-        else:
-            raise Exception('UnkownOutputFormat')
-    else:
-        outfile = pysam.Samfile("-", 'wh', template = infile )
+    outfile = bamIO(args.outputfile, 'w', True, infile)
 
     # open output
-    if args.discarded:
-        if args.discarded[args.discarded.rfind('.'):] == '.bam':
-            discfile = pysam.Samfile(args.discarded, 'wb', template = infile )
-        elif args.discarded[args.discarded.rfind('.'):] == '.sam':
-            discfile = pysam.Samfile(args.discarded, 'w', template = infile )
-        else:
-            raise Exception('UnkownOutputFormat')
-    else:
-        discfile = None
+    discfile = bamIO(args.discarded, 'w', False, infile)
 
 
     # find primer positions
@@ -386,8 +383,11 @@ if __name__=="__main__":
             except:
                 raise
             else:
+                # get read pair primer info
+                expected = expectedPrimerPair(left, rite)
+                overlaps = primersOverlap(left, rite)
                 # tag fragment
-                if left[2] != rite[2]:
+                if not expected:
                     # chimera to discard
                     fragment['chimera'] += 1
                     try:
@@ -395,12 +395,19 @@ if __name__=="__main__":
                         lastseg.set_tag('af', 'chimera', replace=True)
                     except:
                         pass
+                elif overlaps:
+                    fragment['short'] += 1
+                    try:
+                        firstseg.set_tag('af', 'short', replace=True)
+                        lastseg.set_tag('af', 'short', replace=True)
+                    except:
+                        pass
                 else:
                     # expected amplicon
                     fragment['designed'] += 1
 
-                # write file
-                if args.super or left[2] == rite[2]:
+                # write file if no primer overlaps and expected or super
+                if not overlaps and (args.super or expectedPrimerPair(left, rite)):
                     printClipped(outfile, firstseg, (left, rite), gstat, args.extratrim, primermask, args.clipping)
                     printClipped(outfile, lastseg,  (left, rite), gstat, args.extratrim, primermask, args.clipping)
                 else:
@@ -454,6 +461,7 @@ if __name__=="__main__":
     if int(stats['ANALYSED_INSERTS']) > 0:
         stats['FRACTION_ON_TARGET'] = '{:.3f}'.format(fragment['designed']/float(stats['ANALYSED_INSERTS']))
         stats['FRACTION_CHIMERIC'] = '{:.3f}'.format(fragment['chimera']/float(stats['ANALYSED_INSERTS']))
+        stats['FRACTION_SHORT'] = '{:.3f}'.format(fragment['short']/float(stats['ANALYSED_INSERTS']))
         stats['FRACTION_ECTOPIC'] = '{:.3f}'.format(fragment['ectopic']/float(stats['ANALYSED_INSERTS']))
     else:
         stats['FRACTION_ON_TARGET'] = 'NA'
