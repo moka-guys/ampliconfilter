@@ -1,7 +1,7 @@
 # Ampliconfilter 
 scripts to mask primer sequences in aligned DNA amplicons.
 
-## Todos
-- Make it accept normal BEDPE instead of proprietary Qiagen format.
-- change amplicon matchin to allow for amplicons that share primers (amplicons + superamplicons)
+Accepts BEDPE files for primer locations. Supports filtering of superamplicons.
+
+`ampliconfilter.py --help`  for command line options.
 

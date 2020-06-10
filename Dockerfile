@@ -5,3 +5,4 @@ ADD . /code
 RUN pip3 install pysam==0.15.4 cython==0.29.19 
 
 ENTRYPOINT ["/code/ampliconfilter/ampliconFilter.py"]
+
