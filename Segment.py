@@ -14,16 +14,12 @@ __status__ = "Production"
 import bisect  # to add to sorted lists
 import sys
 
-# coordinate segment with metadate
+# tuple of sortable attributes
 class Segment(tuple):
     def __getitem__(self, index):
         if isinstance(index, tuple):
             return [self[i] for i in index]
         return super(Segment, self).__getitem__(index)
-
-    def __len__(self):
-        return abs(self[2]-self[1])
-
 
 # list of segments (with sorted insertion)
 class Segments(list):
@@ -90,15 +86,6 @@ class Segments(list):
                 result.append(a[i])
             return result
         raise ValueError
-
-# Extension of the the segment class
-class Primer(Segment):
-
-    def span(self, other):  # max span
-        if self[0] == other[0]:
-            return max(self[1:3] + other[1:3]) - min(self[1:3] + other[1:3])
-        else:  # different chromosome
-            return None
 
 if __name__=="__main__":
     seg = Segments()

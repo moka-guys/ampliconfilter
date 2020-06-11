@@ -2,8 +2,8 @@
 __doc__='''
 ##################################################################
 ## ampliconFilter.py | Primer/Amplicon stats for PCR based TAS  ##
-## -- QIAGEN PCR TAS protocol                                   ##
-## -- filters himera amplicons                                  ##
+## -- Paired Primer PCR protocol                                ##
+## -- filters chimera amplicons                                 ##
 ## -- masks/nulls/soft/hardclips primer sequences               ##
 ## -- generates primer usage statistics                         ##
 ##################################################################
@@ -22,59 +22,86 @@ import pysam
 import argparse
 import collections
 import datetime, time
-from Pcr import Segment, Segments
+from collections import defaultdict
+from Segment import Segment, Segments
 
 def readBedPe(fi,genome_fasta):
+    """
+    Inputs:
+        BEDPE file
+        Reference Genome (FASTA) file
+
+    Uses reference genome to obtain primer sequences and create sortable primer segments
+    Each Segment object stores primer coordinates and sequences.
+
+    Returns:
+        Two Segment objects (segment lists) for forward and reverse primers
+    """
     genome = pysam.FastaFile(genome_fasta)
-    # create primer and amplicon lists
-    # FIELDS
-    # chrom start
     F, R = Segments(), Segments()
     with open(fi,'r') as fh:
         for i, line in enumerate(fh):
-            # ckip commented lines
+            # skip commented lines
             if line.startswith('#'):
                 continue
             # get fields
             fwd_chrom, fwd_start, fwd_end, rev_chrom, rev_start, rev_end = line.split()
-            # FWD primer (index the leftmost position)
+            # get FWD primer sequence and create Segment (index the leftmost position)
             fwd_seq = genome.fetch(fwd_chrom, int(fwd_start), int(fwd_end))
             fwd_segment = Segment([ fwd_chrom, int(fwd_start), i, {
                 'coords': (int(fwd_start), int(fwd_end)),
                 'seq': fwd_seq
             }])
+            # Insert created segment to Segments (into sorted coordinate position)
             F.sortedInsert(fwd_segment)
-            # REV primer (index the rightmost position)
+            # get REV primer sequence and create Segment (index the rightmost position)
             rev_seq = genome.fetch(rev_chrom, int(rev_start), int(rev_end))
             rev_segment = Segment([ rev_chrom, int(rev_end), i, {
                 'coords': (int(rev_start), int(rev_end)),
                 'seq': revcomp(rev_seq)
             }])
+            # Insert created segment to Segments (into sorted coordinate position)
             R.sortedInsert(rev_segment)
     genome.close()
     return F, R
 
 def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskadaptor=True):
-    '''set quality to zero for leading and trailing primer sequences'''
-    # get primer positions and sequence
+    """
+    Inputs:
+        output file handle
+        pysam aligned_pair
+        matched primers (list of Segment objects)
+        dictionary to collect statistics
+        number of bases to trim into biological sequence after primer
+        list of list with characters to use for hard masking
+        clipping mode (0: no clipping, 1: soft clipping, 2: hard clipping)
+        switch to mask adapter sequences (preceding the primer)
+
+    Clips the found primers from a sequence read (hard of softmasking) and writes to file handle
+
+    Returns:
+        Nothing (writes to passed filehandle)
+    """
+    # get primer positions and sequence for read pair
     newqual, newseq, lprimer, rprimer = '','','',''
     leftprimerstart, leftprimerend = None, None
     riteprimerstart, riteprimerend = None, None
-
     for b in alnread.aligned_pairs:
         if b[0] is not None and b[1] is not None:
+            # check if FWD primer overlaps/bookend upstream read boundary
             if primers[0][3]['coords'][0] <= b[1] and b[1] < primers[0][3]['coords'][1]:
                 if leftprimerstart is None:
                     leftprimerstart = b[0]
                 leftprimerend = b[0]+1
                 lprimer += alnread.seq[b[0]]
+            # check if REV primer overlaps/bookend downstream read boundary
             elif primers[1][3]['coords'][0] <= b[1] and b[1] < primers[1][3]['coords'][1]:
                 if riteprimerstart is None:
                     riteprimerstart = b[0]
                 riteprimerend = b[0]+1
                 rprimer += alnread.seq[b[0]]
 
-    # adjust trimming or set primer to zero
+    # adjust trimming or set primer start (5') to beginning or end of read
     if leftprimerstart is None:
         leftprimerstart = leftprimerend = 0
     elif extratrim:
@@ -84,6 +111,7 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
         riteprimerstart = riteprimerend = len(alnread.seq)
     elif extratrim:
         riteprimerstart -= extratrim
+
     # build masked sequence
     if mask[0]:
         newseq  = mask[0][0] * leftprimerstart if maskadaptor else alnread.seq[:leftprimerstart]
@@ -93,6 +121,8 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
         newseq += mask[0][3] * (len(alnread.seq)-riteprimerend) if maskadaptor else alnread.seq[riteprimerend:]
     else:
         newseq = alnread.seq
+
+    # build masked quality string
     if mask[1]:
         newqual  = mask[1][0] * leftprimerstart if maskadaptor else alnread.qual[:leftprimerstart]
         newqual += mask[1][1] * (leftprimerend-leftprimerstart)
@@ -109,7 +139,7 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
         newpos = alnread.pos + leftprimerend
         # add start clipping
         if leftprimerstart != leftprimerend:
-            newcigartuples.append((clipping+3,leftprimerend))
+            newcigartuples.append((clipping+3, leftprimerend))
         # resolve cigar tuples
         readPos = [0,0]
         for t in alnread.cigartuples:
@@ -139,6 +169,7 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
         except:
             raise Exception('ClippingError')
         else:
+            # replace sequence and quality strings if hardclipping
             if clipping > 1:
                 newseq = newseq[leftprimerend:riteprimerstart]
                 newqual = newqual[leftprimerend:riteprimerstart]
@@ -146,23 +177,23 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
         newcigartuples = alnread.cigartuples
         newpos = alnread.pos
 
-    # mark if adapter found
-    adapterfound = [True if leftprimerstart != 0 else False, True if riteprimerend != len(alnread.seq) else False]
-
-    # collect stats
+    # collect stats (forward primer)
     loc = 'three' if alnread.is_reverse else 'five'
+    # count found primer
     globalstat[loc]['found'][int(bool(leftprimerend))] += 1
+    #  count inexact primer match
     globalstat[loc]['mismatch'][matchstring(lprimer, primers[0][3]['seq'][-len(lprimer):]).count('-')] += 1
+    # count missing primer
     globalstat[loc]['missing'][len(primers[0][3]['seq'])-len(lprimer)] += 1
-    globalstat[loc]['adapter'][leftprimerstart] += 1
 
+    # collect stats (reverse primer)
     loc = 'five' if alnread.is_reverse else 'three'
     globalstat[loc]['found'][int(bool(len(alnread.seq)-riteprimerstart))] += 1
     globalstat[loc]['mismatch'][matchstring(rprimer, revcomp(primers[1][3]['seq'])[:len(rprimer)]).count('-')] += 1
     globalstat[loc]['missing'][len(primers[1][3]['seq'])-len(rprimer)] += 1
-    globalstat[loc]['adapter'][len(alnread.seq)-riteprimerend] += 1
 
-    # some cheap paranoia code
+    # sanity check if read edit resulted in sequence and quality strings of
+    # same length and that the length of the primer has been removed/masked
     try:
         if clipping > 1:
             assert len(newseq) == len(newqual) and \
@@ -182,7 +213,7 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
         print(newpos, file=sys.stderr)
         raise
 
-    # update and print
+    # update aligned read sequence, quality, CIGAR and position
     alnread.seq = newseq
     alnread.qual = newqual
     alnread.cigartuples = newcigartuples
@@ -221,7 +252,18 @@ def get_matched(le,ri):
                 return l, r
     return None, None
 
-'''BAM/SAM I/O'''
+'''
+Inputs:
+    file name (optional)
+    read or write mode
+    get read/write stream if no file name given
+    SAM/BAM file template
+
+BAM/SAM I/O generates appropriate pysam read or write handle (DRY)
+
+Returns:
+    pysam file handle or None
+'''
 def bamIO(name, mode, stream=False, template=None):
     if name:
         extension = name[name.rfind('.'):]
@@ -234,10 +276,29 @@ def bamIO(name, mode, stream=False, template=None):
     else:
         return pysam.Samfile("-",'{}'.format(mode), template=template) if stream else None
 
-'''checks if primers overlap'''
+'''
+Inputs:
+    left primer Segment
+    right primer Segment
+
+Check if two primers overlap
+
+Returns:
+    Boolean
+'''
 def primersOverlap(l,r):
     return l[3]['coords'][1] > r[3]['coords'][0]
 
+'''
+Inputs:
+    left primer Segment
+    right primer Segment
+
+Check if 2 primers come from the same primer pair
+
+Returns:
+    Boolean
+'''
 def expectedPrimerPair(l,r):
     return l[2] == r[2]
 
@@ -256,7 +317,7 @@ if __name__=="__main__":
     parser.add_argument('-g','--genome', metavar='FILE', help='The indexed genome FASTA file', type=str)
 
     # other options
-    parser.add_argument('--super', help='Allows all primer combinations', action="store_true", default=False)
+    parser.add_argument('--super', help='Allows all primer combinations (chimera/superamplicons)', action="store_true", default=False)
     parser.add_argument('--mask', help='Sequence hardmasking (Default: False)', action="store_true", default=False)
     parser.add_argument('--clipping', help='Primer clipping [0] noclip, [1] softclip, [2] hardclip (Default: 0)', type=int, default=0)
     parser.add_argument('--primerdistance', metavar='INT', help='maximum distance from nearest possible primer [0]', type=int, default=0)
@@ -266,7 +327,8 @@ if __name__=="__main__":
 
     args = parser.parse_args()
 
-    # define sequence/quality masking
+    # define sequence/quality masking characters (for sequence and quality string)
+    # [ fwd_adapter, fwd_primer, rev_primer, rev_adapter ]
     if args.mask:
         primermask = [['N','N','N','N'],['!','!','!','!']]
     else:
@@ -277,21 +339,24 @@ if __name__=="__main__":
     fwd, rev = readBedPe(args.designfile,args.genome)
     print("\rRead design from %s" % args.designfile, file=sys.stderr)
 
-    # open input
+    # open SAM/BAM input file/stream
     infile = bamIO(args.inputfile, 'r', True)
 
-    # open output
+    # open output for filtered/clipped reads
     outfile = bamIO(args.outputfile, 'w', True, infile)
 
-    # open output
+    # open output stream for discarded reads
     discfile = bamIO(args.discarded, 'w', False, infile)
 
+    # fragment counter and primer counters
+    fragment = collections.Counter()
+    gstat = {'five': collections.defaultdict(collections.Counter),
+             'three': collections.defaultdict(collections.Counter)}
+
+    # alignment buffer (to find and combine read pairs)
+    alnbuffer = {}  # alignment buffer
 
     # find primer positions
-    from collections import defaultdict
-    fragment = collections.Counter()
-    alnbuffer = {}  # alignment buffer
-    gstat = { 'five': collections.defaultdict(collections.Counter), 'three': collections.defaultdict(collections.Counter) }
     for i, aln in enumerate(infile):
         # progressmeter
         if i % 10000 == 0:
@@ -300,7 +365,7 @@ if __name__=="__main__":
             else:
                 sys.stderr.write('.')
             sys.stderr.flush()
-        # filter singletons,unmapped,qcfail,seconday,supplementary
+        # filter singletons,unmapped,qcfail,seconday,supplementary (write to discarded file)
         if not aln.is_unmapped and aln.mate_is_unmapped:  # M-
             if discfile:
                 try:
@@ -341,9 +406,9 @@ if __name__=="__main__":
                     pass
                 discfile.write(aln)
             pass  # don't print anything supplementary
-        # buffer and resolve (PairedEnd)
+        # read is paired and has a buffered mate
         elif is_paired(aln) and aln.qname in list(alnbuffer.keys()):  # found mate -> print
-            # get left right end
+            # get mate from buffer and order Forward,Reverse
             if alnbuffer[aln.qname].is_reverse and not aln.is_reverse:
                 firstseg = aln
                 lastseg = alnbuffer[aln.qname]
@@ -352,21 +417,26 @@ if __name__=="__main__":
                 lastseg = aln
             else:
                 print(aln.flag, file=sys.stderr)
-                raise Exception("ParanoiaGotReal")
-            # get ends
+                raise Exception("Reads are not in FR orientation")
+            # get ends of read pair (add tolerance offset for finding primer)
             pair_start = firstseg.reference_start + args.tolerance + 1
             pair_end = lastseg.reference_end - args.tolerance - 1
+            # create Segments for each read
             l = Segment((infile.getrname(firstseg.rname), pair_start))
             r = Segment((infile.getrname(lastseg.rname), pair_end))
-            # find primers
+            # find all matching primers by bisection
             try:
                 lefts = fwd.find_all_le(l)
                 rites = rev.find_all_ge(r)
+                # if superamplicons(chimera) allowed use first primers found
+                # else only get primers from matching pairs
                 left, rite = (lefts[0], rites[0]) if args.super else get_matched(lefts,rites)
                 assert left and rite  # found a matching pair
                 assert left[0] == rite[0]  # references match
                 assert l[1] - left[3]['coords'][1] < args.primerdistance and rite[3]['coords'][0] - r[1] < args.primerdistance
-            except (ValueError, AssertionError, TypeError):  # no primer found or on different chromosomes
+            except (ValueError, AssertionError, TypeError):
+                # no primer found or on different chromosomes
+                # tag reads with reason and write to discard file
                 fragment['ectopic'] += 1
                 if discfile:
                     try:
@@ -386,9 +456,9 @@ if __name__=="__main__":
                 # get read pair primer info
                 expected = expectedPrimerPair(left, rite)
                 overlaps = primersOverlap(left, rite)
-                # tag fragment
+                # tag fragment and count
                 if not expected:
-                    # chimera to discard
+                    # superamplicon (chimera)
                     fragment['chimera'] += 1
                     try:
                         firstseg.set_tag('af', 'chimera', replace=True)
@@ -396,6 +466,7 @@ if __name__=="__main__":
                     except:
                         pass
                 elif overlaps:
+                    # no biological sequence
                     fragment['short'] += 1
                     try:
                         firstseg.set_tag('af', 'short', replace=True)
@@ -414,14 +485,13 @@ if __name__=="__main__":
                     if discfile:
                         discfile.write(firstseg)
                         discfile.write(lastseg)
-            # cleanup buffer
+            # remove read from alignment buffer
             del alnbuffer[aln.qname]
         elif is_paired(aln):
             # buffer segment
             alnbuffer[aln.qname] = aln
-
-        # not proper pair (both mapped or SingleEnd)
-        elif not aln.mate_is_unmapped:  # BOTH MAPPED NOT PROPERLY PAIRED
+        elif not aln.mate_is_unmapped:
+            # discard not proper pair (both mapped or SingleEnd)
             if discfile:  # no proper pair flag
                 try:
                     aln.set_tag('af', 'notproper', replace=True)
@@ -432,7 +502,7 @@ if __name__=="__main__":
             raise Exception('CantDecideFilter')
 
 
-        ## check buffer size
+        ## check buffer overflow (avoid memory usage escalation)
         if len(alnbuffer) > args.maxbuffer:
             print("ERROR: Buffer overflow (%d)" % args.maxbuffer, file=sys.stderr)
             raise Exception("BufferOverflow")
@@ -453,10 +523,8 @@ if __name__=="__main__":
         print("First 50 mate-less mappings:\n", '\n'.join(list(alnbuffer.keys())[:50]), file=sys.stderr)
         #raise Exception("TruncatedInput")
 
-    # summary statistics
+    # calculate summary statistics
     stats = collections.OrderedDict()
-
-    ## target amplicons
     stats['ANALYSED_INSERTS'] = str(sum(fragment.values()))
     if int(stats['ANALYSED_INSERTS']) > 0:
         stats['FRACTION_ON_TARGET'] = '{:.3f}'.format(fragment['designed']/float(stats['ANALYSED_INSERTS']))
