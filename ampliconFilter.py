@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-__doc__='''
+__doc__="""
 ##################################################################
 ## ampliconFilter.py | Primer/Amplicon stats for PCR based TAS  ##
 ## -- Paired Primer PCR protocol                                ##
@@ -7,7 +7,7 @@ __doc__='''
 ## -- masks/nulls/soft/hardclips primer sequences               ##
 ## -- generates primer usage statistics                         ##
 ##################################################################
-'''
+"""
 
 __author__ = "David Brawand"
 __credits__ = ['David Brawand']
@@ -86,20 +86,20 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
     newqual, newseq, lprimer, rprimer = '','','',''
     leftprimerstart, leftprimerend = None, None
     riteprimerstart, riteprimerend = None, None
-    for b in alnread.aligned_pairs:
-        if b[0] is not None and b[1] is not None:
+    for aligned_pair in alnread.aligned_pairs:  # aligned_pairs [(position in read, position in reference)]
+        if aligned_pair[0] is not None and aligned_pair[1] is not None:
             # check if FWD primer overlaps/bookend upstream read boundary
-            if primers[0][3]['coords'][0] <= b[1] and b[1] < primers[0][3]['coords'][1]:
+            if primers[0][3]['coords'][0] <= aligned_pair[1] and aligned_pair[1] < primers[0][3]['coords'][1]:
                 if leftprimerstart is None:
-                    leftprimerstart = b[0]
-                leftprimerend = b[0]+1
-                lprimer += alnread.seq[b[0]]
+                    leftprimerstart = aligned_pair[0]
+                leftprimerend = aligned_pair[0]+1
+                lprimer += alnread.seq[aligned_pair[0]]
             # check if REV primer overlaps/bookend downstream read boundary
-            elif primers[1][3]['coords'][0] <= b[1] and b[1] < primers[1][3]['coords'][1]:
+            elif primers[1][3]['coords'][0] <= aligned_pair[1] and aligned_pair[1] < primers[1][3]['coords'][1]:
                 if riteprimerstart is None:
-                    riteprimerstart = b[0]
-                riteprimerend = b[0]+1
-                rprimer += alnread.seq[b[0]]
+                    riteprimerstart = aligned_pair[0]
+                riteprimerend = aligned_pair[0]+1
+                rprimer += alnread.seq[aligned_pair[0]]
 
     # adjust trimming or set primer start (5') to beginning or end of read
     if leftprimerstart is None:
@@ -139,7 +139,8 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
         newpos = alnread.pos + leftprimerend
         # add start clipping
         if leftprimerstart != leftprimerend:
-            newcigartuples.append((clipping+3, leftprimerend))
+            # clipping==1 (softclip) => 4 (CSOFT_CLIP) / clipping==2 (hardclip) => 5 (CHARD_CLIP)
+            newcigartuples.append((clipping+3, leftprimerend)) 
         # resolve cigar tuples
         readPos = [0,0]
         for t in alnread.cigartuples:
@@ -150,16 +151,33 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
                 newcigartuples.append((t[0],t[1]))  # no length in read -> preserve
                 continue
             # edit/discard/keep cigar tuple
+            # *-*-*-*-*-*-*-*-*-*-*-*-*-*-*
+            # Eg. sequence is split left
+            #      |==========================|
+            #      readPos[0]        readPos[1]
+            #
+            #    |===================|------------|===================|
+            #    leftprimerstart                  riteprimerstart
+            #            leftprimerend                    riteprimerend
+            #
+            # will become:
+            #                        |========|  (left end of cigartuple is clipped)
+            #   
             if readPos[0] < leftprimerend and riteprimerstart < readPos[1]:
-                newcigartuples.append((t[0], riteprimerstart-leftprimerend))  # spans both primers -> strip
+                # sequence fragment (cigar op) spans both primers -> strip
+                newcigartuples.append((t[0], riteprimerstart-leftprimerend))
             elif readPos[1] <= leftprimerend or riteprimerstart <= readPos[0]:
-                pass  # cigar within primer -> discard
+                # sequence fragment within primer -> discard
+                pass  
             elif readPos[0] < leftprimerend and leftprimerend < readPos[1]:
-                newcigartuples.append((t[0], readPos[1]-leftprimerend))  # split left
+                # sequence fragment is split left (preserve OP, modify length)
+                newcigartuples.append((t[0], readPos[1]-leftprimerend))
             elif readPos[0] < riteprimerstart and riteprimerstart < readPos[1]:
-                newcigartuples.append((t[0], riteprimerstart-readPos[0]))  # split right
+                # sequence fragment is split right
+                newcigartuples.append((t[0], riteprimerstart-readPos[0]))
             else:
-                newcigartuples.append((t[0],t[1]))  # internal -> keep
+                # internal sequence fragment (not primer) -> keep
+                newcigartuples.append((t[0],t[1]))
         # add end clipping
         if riteprimerstart != riteprimerend:
             newcigartuples.append((clipping+3,len(alnread.seq)-riteprimerstart))
@@ -233,38 +251,62 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
         raise
     return
 
-'''returns match string with *:match -:mismatch'''
+"""returns match string with *:match -:mismatch"""
 matchstring = lambda x,y: ''.join(['*' if n == y[i] else "-" for i,n in enumerate(x) ])
 
-'''reverse complement'''
+"""reverse complement"""
 revcomp = lambda x: ''.join([{'A':'T','C':'G','G':'C','T':'A'}[B] for B in x][::-1])
 
-'''is "properly" paired (correct reference and orientation)'''
 def is_paired(aln):
+    """
+    Input:
+        pysam.AlignedRead
+
+    "properly" paired (correct reference and orientation)
+    
+    NB: This is used instead of the properly_paired flag as rare superamplicons
+    fall outside the expected insert size distribution and are not marked as such. 
+    
+    NB: It does not check if the orientation is FR as RF orientations are discarded due
+    to no biological sequence.
+
+    Returns:
+        Boolean
+    
+    """
     return aln.is_paired and aln.is_reverse != aln.mate_is_reverse
     # return aln.is_proper_pair and aln.is_reverse != aln.mate_is_reverse
 
-'''get matching primers from a list'''
-def get_matched(le,ri):
+def get_matched_primer_pair(le,ri):
+    """
+    Inputs:
+        two lists of primers
+
+    get matching primers from a list (get primer pair from same amplicon)
+    
+    Returns:
+        matched primer pair (same amplicon) if any
+
+    """
     for l in le:
         for r in ri:
             if l[2] == r[2]:
                 return l, r
     return None, None
 
-'''
-Inputs:
-    file name (optional)
-    read or write mode
-    get read/write stream if no file name given
-    SAM/BAM file template
-
-BAM/SAM I/O generates appropriate pysam read or write handle (DRY)
-
-Returns:
-    pysam file handle or None
-'''
 def bamIO(name, mode, stream=False, template=None):
+    """
+    Inputs:
+        file name (optional)
+        read or write mode
+        get read/write stream if no file name given
+        SAM/BAM file template
+
+    BAM/SAM I/O generates appropriate pysam read or write handle (DRY)
+
+    Returns:
+        pysam file handle or None
+    """
     if name:
         extension = name[name.rfind('.'):]
         if extension == '.bam':
@@ -276,34 +318,36 @@ def bamIO(name, mode, stream=False, template=None):
     else:
         return pysam.Samfile("-",'{}'.format(mode), template=template) if stream else None
 
-'''
-Inputs:
-    left primer Segment
-    right primer Segment
-
-Check if two primers overlap
-
-Returns:
-    Boolean
-'''
 def primersOverlap(l,r):
+    """
+    Inputs:
+        left primer Segment
+        right primer Segment
+
+    Check if two primers overlap
+
+    Returns:
+        Boolean
+    """
     return l[3]['coords'][1] > r[3]['coords'][0]
 
-'''
-Inputs:
-    left primer Segment
-    right primer Segment
-
-Check if 2 primers come from the same primer pair
-
-Returns:
-    Boolean
-'''
 def expectedPrimerPair(l,r):
+    """
+    Inputs:
+        left primer Segment
+        right primer Segment
+
+    Check if 2 primers come from the same primer pair
+
+    Returns:
+        Boolean
+    """
     return l[2] == r[2]
 
-'''main'''
 if __name__=="__main__":
+    """
+    Main CLI interface
+    """
     # timestamp
     ts = time.time()
     # mandatory arguments
@@ -319,8 +363,8 @@ if __name__=="__main__":
     # other options
     parser.add_argument('--super', help='Allows all primer combinations (chimera/superamplicons)', action="store_true", default=False)
     parser.add_argument('--mask', help='Sequence hardmasking (Default: False)', action="store_true", default=False)
-    parser.add_argument('--clipping', help='Primer clipping [0] noclip, [1] softclip, [2] hardclip (Default: 0)', type=int, default=0)
-    parser.add_argument('--primerdistance', metavar='INT', help='maximum distance from nearest possible primer [0]', type=int, default=0)
+    parser.add_argument('--clipping', help='Primer clipping [0] noclip, [1] softclip, [2] hardclip (Default: 0)', type=int, choices=[0,1,2], default=0)
+    parser.add_argument('--primerdistance', metavar='INT', help='maximum distance from nearest possible primer 5\' end [0]', type=int, default=0)
     parser.add_argument('--tolerance', metavar='INT', help='detection end tolerance [0]', type=int, default=0)
     parser.add_argument('--maxbuffer', metavar='INT', help='maximum read buffer size [100000]', type=int, default=100000)
     parser.add_argument('--extratrim', metavar='INT', help='additional trimming after primer [0]', type=int, default=0)
@@ -332,6 +376,7 @@ if __name__=="__main__":
     if args.mask:
         primermask = [['N','N','N','N'],['!','!','!','!']]
     else:
+        # we mask the quality in any case as this prevents variantcallers from using primer sequences through realignment of softclipped sequences
         primermask = [[],['!','!','!','!']]
 
     # read design file and create primer libraries (Forward and Reverse)
@@ -426,14 +471,16 @@ if __name__=="__main__":
             r = Segment((infile.getrname(lastseg.rname), pair_end))
             # find all matching primers by bisection
             try:
+                # get all primers that match (primers in each list are all the same but from difference amplicon pairs)
                 lefts = fwd.find_all_le(l)
                 rites = rev.find_all_ge(r)
                 # if superamplicons(chimera) allowed use first primers found
                 # else only get primers from matching pairs
-                left, rite = (lefts[0], rites[0]) if args.super else get_matched(lefts,rites)
+                left, rite = (lefts[0], rites[0]) if args.super else get_matched_primer_pair(lefts,rites)
                 assert left and rite  # found a matching pair
                 assert left[0] == rite[0]  # references match
-                assert l[1] - left[3]['coords'][1] < args.primerdistance and rite[3]['coords'][0] - r[1] < args.primerdistance
+                assert l[1] - left[3]['coords'][1] < args.primerdistance  # fwd read starts before primer 3'end or up to primerdistance after
+                assert rite[3]['coords'][0] - r[1] < args.primerdistance  # same logic for reverse primer
             except (ValueError, AssertionError, TypeError):
                 # no primer found or on different chromosomes
                 # tag reads with reason and write to discard file
