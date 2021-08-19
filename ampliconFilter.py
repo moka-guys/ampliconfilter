@@ -65,7 +65,7 @@ def readBedPe(fi,genome_fasta):
     genome.close()
     return F, R
 
-def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskadaptor=True):
+def primerClip(alnread,primers,globalstat,extratrim,mask,clipping=0,maskadaptor=True):
     """
     Inputs:
         output file handle
@@ -78,9 +78,10 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
         switch to mask adapter sequences (preceding the primer)
 
     Clips the found primers from a sequence read (hard of softmasking) and writes to file handle
+    This will not adjust the mate positions (use sync_mate_pos)
 
     Returns:
-        Nothing (writes to passed filehandle)
+        the clipped primer or None if no sequence remains
     """
     # get primer positions and sequence for read pair
     newqual, newseq, lprimer, rprimer = '','','',''
@@ -135,8 +136,6 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
     # SOFT/HARDCLIPPING OF PRIMER SEQUENCES
     if clipping:
         newcigartuples = []
-        # change position
-        newpos = alnread.pos + leftprimerend
         # add start clipping
         if leftprimerstart != leftprimerend:
             # clipping==1 (softclip) => 4 (CSOFT_CLIP) / clipping==2 (hardclip) => 5 (CHARD_CLIP)
@@ -144,7 +143,7 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
         # resolve cigar tuples
         readPos = [0,0]
         for t in alnread.cigartuples:
-            if t[0] in (0,1,4,7,8):  # MIS=X
+            if t[0] in (0,1,4,7,8):  # MIS=X (query consumers)
                 readPos[0] = readPos[1]
                 readPos[1] += t[1]
             else:
@@ -191,6 +190,20 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
             if clipping > 1:
                 newseq = newseq[leftprimerend:riteprimerstart]
                 newqual = newqual[leftprimerend:riteprimerstart]
+        # change position (needs to be adjusted if begins with softclip on fwd strand)
+        # first operation that consumes reference (MDN=X)
+        first_reference_base = 0
+        for o, l in newcigartuples:
+            if o in [0,2,3,7,8]:
+                break
+            first_reference_base += l
+        # extract aligned position corresponding to new first reference base
+        try:
+            newpos = alnread.get_aligned_pairs()[first_reference_base][1] 
+            assert newpos
+        except:
+            # contains no sequence ofter clipping of primers
+            newpos = None
     else:
         newcigartuples = alnread.cigartuples
         newpos = alnread.pos
@@ -231,31 +244,42 @@ def printClipped(ofh,alnread,primers,globalstat,extratrim,mask,clipping=0,maskad
         print(newpos, file=sys.stderr)
         raise
 
-    # update aligned read sequence, quality, CIGAR and position
-    alnread.seq = newseq
-    alnread.qual = newqual
-    alnread.cigartuples = newcigartuples
-    alnread.pos = newpos
-    # add primer names to tag
-    try:
-        alnread.set_tag('xp', f'{primers[0][2]}|{primers[1][2]}', replace=True)
-    except:
-        pass
-    # write read
-    try:
-        ofh.write(alnread)
-    except:
-        print(alnread.qname, alnread.cigarstring, len(alnread.seq), len(alnread.qual), file=sys.stderr)
-        print(lprimer, leftprimerstart, leftprimerend, file=sys.stderr)
-        print(rprimer, riteprimerstart, riteprimerend, file=sys.stderr)
-        raise
-    return
+
+    if newpos:
+        # update aligned read sequence, quality, CIGAR and position
+        alnread.seq = newseq
+        alnread.qual = newqual
+        alnread.cigartuples = newcigartuples
+        alnread.pos = newpos
+        # add primer names to tag
+        try:
+            alnread.set_tag('xp', f'{primers[0][2]}|{primers[1][2]}', replace=True)
+        except:
+            pass
+        # return primerclipped read
+        return alnread
+    else:
+        return None
 
 """returns match string with *:match -:mismatch"""
 matchstring = lambda x,y: ''.join(['*' if n == y[i] else "-" for i,n in enumerate(x) ])
 
 """reverse complement"""
 revcomp = lambda x: ''.join([{'A':'T','C':'G','G':'C','T':'A'}[B] for B in x][::-1])
+
+def sync_mate_pos(x,y):
+    """
+    Inputs:
+        a pair of alignments
+
+    Checks for query name match and adjust mate positions
+
+    Returns:
+        the same pair with adjusted mate position
+    """
+    if x.qname == y.qname:
+        x.pnext, y.pnext = y.pos, x.pos
+    return x, y
 
 def is_paired(aln):
     """
@@ -526,8 +550,27 @@ if __name__=="__main__":
 
                 # write file if no primer overlaps and expected or super
                 if not overlaps and (args.super or expectedPrimerPair(left, rite)):
-                    printClipped(outfile, firstseg, (left, rite), gstat, args.extratrim, primermask, args.clipping)
-                    printClipped(outfile, lastseg,  (left, rite), gstat, args.extratrim, primermask, args.clipping)
+                    # get clipped primers, return None if no sequence remains
+                    firstclipped  = primerClip(firstseg, (left, rite), gstat, args.extratrim, primermask, args.clipping)
+                    secondclipped = primerClip(lastseg,  (left, rite), gstat, args.extratrim, primermask, args.clipping)
+                    if firstclipped and secondclipped:
+                        # synchronise new mate pos
+                        firstclipped, secondclipped = sync_mate_pos(firstclipped, secondclipped)
+                        # print both sequences
+                        for alnread in [firstclipped, secondclipped]:
+                            try:
+                                outfile.write(alnread)
+                            except Exception as e:
+                                print(alnread, file=sys.stderr)
+                                raise Exception("Could not write clipped read")
+                    else:
+                        # discard pair if one sequence only contains primer
+                        if discfile:
+                            firstseg.set_tag('af', 'primeronly', replace=True)
+                            lastseg.set_tag('af', 'primeronly', replace=True)
+                            discfile.write(firstseg)
+                            discfile.write(lastseg)
+
                 else:
                     if discfile:
                         discfile.write(firstseg)
