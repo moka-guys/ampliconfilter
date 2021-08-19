@@ -81,7 +81,7 @@ def primerClip(alnread,primers,globalstat,extratrim,mask,clipping=0,maskadaptor=
     This will not adjust the mate positions (use sync_mate_pos)
 
     Returns:
-        the clipped primer or None if no sequence remains
+        the primer clipped pysam.AlignedSegment, or None if no sequence remains
     """
     # get primer positions and sequence for read pair
     newqual, newseq, lprimer, rprimer = '','','',''
@@ -267,15 +267,15 @@ matchstring = lambda x,y: ''.join(['*' if n == y[i] else "-" for i,n in enumerat
 """reverse complement"""
 revcomp = lambda x: ''.join([{'A':'T','C':'G','G':'C','T':'A'}[B] for B in x][::-1])
 
-def sync_mate_pos(x,y):
+def sync_mate_pos(x, y):
     """
     Inputs:
-        a pair of alignments
+        a pair of pysam.AlignedSegments
 
-    Checks for query name match and adjust mate positions
+    Checks for query name match and adjust mate positions respectively
 
     Returns:
-        the same pair with adjusted mate position
+        the same pair with fixed mate positions
     """
     if x.qname == y.qname:
         x.pnext, y.pnext = y.pos, x.pos
