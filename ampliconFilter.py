@@ -68,7 +68,6 @@ def readBedPe(fi,genome_fasta):
 def primerClip(alnread,primers,globalstat,extratrim,mask,clipping=0,maskadaptor=True):
     """
     Inputs:
-        output file handle
         pysam aligned_pair
         matched primers (list of Segment objects)
         dictionary to collect statistics
@@ -191,14 +190,15 @@ def primerClip(alnread,primers,globalstat,extratrim,mask,clipping=0,maskadaptor=
                 newseq = newseq[leftprimerend:riteprimerstart]
                 newqual = newqual[leftprimerend:riteprimerstart]
         # change position (needs to be adjusted if begins with softclip on fwd strand)
-        # first operation that consumes reference (MDN=X)
+        # first operation that consumes reference (CIGAR operations MDN=X)
         first_reference_base = 0
-        for o, l in newcigartuples:
-            if o in [0,2,3,7,8]:
+        for o, l in newcigartuples:  # (numeric operation code, length of operation) from CIGAR string
+            if o in (0,2,3,7,8):  #  break at first reference sequence consuming CIGAR operation
                 break
             first_reference_base += l
         # extract aligned position corresponding to new first reference base
         try:
+            # extract reference position of position in query (https://pysam.readthedocs.io/en/latest/api.html#pysam.AlignedSegment.get_aligned_pairs)
             newpos = alnread.get_aligned_pairs()[first_reference_base][1] 
             assert newpos
         except:
