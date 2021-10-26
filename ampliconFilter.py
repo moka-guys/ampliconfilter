@@ -18,12 +18,15 @@ __email__ = "dbrawand@nhs.net"
 __status__ = "Production"
 
 import sys
+from typing import get_args
 import pysam
 import argparse
 import collections
 import datetime, time
 from collections import defaultdict
+from IO import bamIO
 from Segment import Segment, Segments
+from functools import reduce
 
 def readBedPe(fi,genome_fasta):
     """
@@ -193,17 +196,24 @@ def primerClip(alnread,primers,globalstat,extratrim,mask,clipping=0,maskadaptor=
         # first operation that consumes reference (CIGAR operations MDN=X)
         first_reference_base = 0
         for o, l in newcigartuples:  # (numeric operation code, length of operation) from CIGAR string
-            if o in (0,2,3,7,8):  #  break at first reference sequence consuming CIGAR operation
+            if o in (0,2,3,7,8):  #  break at first reference consumer CIGAR operation (reference consumers)
                 break
-            first_reference_base += l
+            elif o in (0,1,4,7,8):  # only advance if query consumed
+                first_reference_base += l
         # extract aligned position corresponding to new first reference base
         try:
             # extract reference position of position in query (https://pysam.readthedocs.io/en/latest/api.html#pysam.AlignedSegment.get_aligned_pairs)
             newpos = alnread.get_aligned_pairs()[first_reference_base][1] 
             assert newpos
-        except:
+        except (AssertionError, IndexError):
             # contains no sequence ofter clipping of primers
             newpos = None
+        except:
+            print(alnread.qname)
+            print(alnread.get_aligned_pairs())
+            print(first_reference_base)
+            print(alnread.cigartuples, newcigartuples)
+            raise Exception("Alignment pair out of range (BAM input valid?)")
     else:
         newcigartuples = alnread.cigartuples
         newpos = alnread.pos
@@ -267,24 +277,37 @@ matchstring = lambda x,y: ''.join(['*' if n == y[i] else "-" for i,n in enumerat
 """reverse complement"""
 revcomp = lambda x: ''.join([{'A':'T','C':'G','G':'C','T':'A'}[B] for B in x][::-1])
 
-def sync_mate_pos(x, y):
+"""flatten list of lists"""
+flatten = lambda x: [item for sublist in x for item in sublist]
+
+"""check if all elements in list are the same"""
+all_same = lambda x: not x or x.count(x[0]) == len(x)
+
+def sync_mate_positions(alns):
     """
     Inputs:
-        a pair of pysam.AlignedSegments
+        a list of pysam.AlignedSegments
 
     Checks for query name match and adjust mate positions respectively
 
     Returns:
-        the same pair with fixed mate positions
+        Nothing (mutates input)
     """
-    if x.qname == y.qname:
-        x.pnext, y.pnext = y.pos, x.pos
-    return x, y
+    if len(set(map(lambda a: a.qname, alns))) == 1:
+        for i in range(len(alns)):
+            if not alns[i].is_secondary:
+                for j in range(len(alns)):
+                    if i != j and alns[i].is_reverse != alns[j].is_reverse:
+                        alns[j].pnext = alns[i].pos
+                        if not alns[j].is_secondary:
+                            alns[i].pnext = alns[j].pos
+
+    return alns
 
 def is_paired(aln):
     """
     Input:
-        pysam.AlignedRead
+        pysam.AlignedSegment
 
     "properly" paired (correct reference and orientation)
     
@@ -299,7 +322,32 @@ def is_paired(aln):
     
     """
     return aln.is_paired and aln.is_reverse != aln.mate_is_reverse
-    # return aln.is_proper_pair and aln.is_reverse != aln.mate_is_reverse
+
+def is_complete(alns):
+    """
+    Input:
+        list of pysam.AlignedSegment
+    
+    returns true if all secondary and supplementary alignments are included (if any) and
+    forward and reverse primary alignments exists
+
+    Returns:
+        Boolean
+
+    """
+    try:
+        # check if at least two
+        assert len(alns)>1
+        # check if forward and reverse primary alignment present
+        rev_primary = [aln.is_reverse for aln in alns if not aln.is_secondary]
+        assert any(rev_primary) and not all(rev_primary)
+        # check if seconday and if all there
+        secondary_alignments = flatten([ aln.get_tag('SA').rstrip(';').split(';') \
+            for aln in alns if not aln.is_secondary and aln.has_tag('SA')])
+        assert len(secondary_alignments) == len([aln for aln in alns if aln.is_secondary])
+    except AssertionError:
+        return False
+    return True
 
 def get_matched_primer_pair(le,ri):
     """
@@ -317,30 +365,6 @@ def get_matched_primer_pair(le,ri):
             if l[2] == r[2]:
                 return l, r
     return None, None
-
-def bamIO(name, mode, stream=False, template=None):
-    """
-    Inputs:
-        file name (optional)
-        read or write mode
-        get read/write stream if no file name given
-        SAM/BAM file template
-
-    BAM/SAM I/O generates appropriate pysam read or write handle (DRY)
-
-    Returns:
-        pysam file handle or None
-    """
-    if name:
-        extension = name[name.rfind('.'):]
-        if extension == '.bam':
-            return pysam.Samfile(name, '{}b'.format(mode), template=template)
-        elif extension == '.sam':
-            return pysam.Samfile(name, '{}'.format(mode), template=template)
-        else:
-            raise Exception('UnkownInputFormat')
-    else:
-        return pysam.Samfile("-",'{}'.format(mode), template=template) if stream else None
 
 def primersOverlap(l,r):
     """
@@ -423,7 +447,7 @@ if __name__=="__main__":
              'three': collections.defaultdict(collections.Counter)}
 
     # alignment buffer (to find and combine read pairs)
-    alnbuffer = {}  # alignment buffer
+    alnbuffer = defaultdict(list)  # alignment buffer
 
     # find primer positions
     for i, aln in enumerate(infile):
@@ -459,15 +483,7 @@ if __name__=="__main__":
                     pass
                 discfile.write(aln)
             pass  # don't print anything that failed QC
-        elif aln.is_secondary:
-            if discfile:
-                try:
-                    aln.set_tag('af', 'secondary', replace=True)
-                except:
-                    pass
-                discfile.write(aln)
-            pass  # don't print anything secondary
-        elif int(aln.flag) & 2048:  #aln.is_supplementary
+        elif aln.is_supplementary:  # supplementary are non-linear
             if discfile:
                 try:
                     aln.set_tag('af', 'supplementary', replace=True)
@@ -476,17 +492,53 @@ if __name__=="__main__":
                 discfile.write(aln)
             pass  # don't print anything supplementary
         # read is paired and has a buffered mate
-        elif is_paired(aln) and aln.qname in list(alnbuffer.keys()):  # found mate -> print
-            # get mate from buffer and order Forward,Reverse
-            if alnbuffer[aln.qname].is_reverse and not aln.is_reverse:
-                firstseg = aln
-                lastseg = alnbuffer[aln.qname]
-            elif aln.is_reverse and not alnbuffer[aln.qname].is_reverse:
-                firstseg = alnbuffer[aln.qname]
-                lastseg = aln
-            else:
-                print(aln.flag, file=sys.stderr)
+        elif is_paired(aln):
+            # buffer segment
+            alnbuffer[aln.qname].append(aln)
+        elif not aln.mate_is_unmapped:
+            # discard not proper pair (both mapped or SingleEnd)
+            if discfile:  # no proper pair flag
+                try:
+                    aln.set_tag('af', 'notproper', replace=True)
+                except:
+                    pass
+                discfile.write(aln)
+        else:
+            raise Exception('CantDecideFilter')
+
+        # check if read pair (and secondary alignemnts) are all in buffer and can be resolved
+        if is_complete(alnbuffer[aln.qname]):
+            alns = alnbuffer[aln.qname]
+
+            # check if primary alignments on same chromosome, else discard as non-linear
+            primary_same_reference = all_same([ a.reference_name for a in alns])
+            if not primary_same_reference:
+                # discard all non primary with other reference
+                if discfile:  # no proper pair flag
+                    for a in alns:
+                        try:
+                            a.set_tag('af', 'nonlinear', replace=True)
+                        except:
+                            pass
+                        discfile.write(a)
+                del alnbuffer[aln.qname]
+                continue
+
+            # get leftmost and rightmost alignment (which are relevant for primer matching)
+            firstseg, lastseg = None, None
+            for a in alns:
+                if a.is_reverse:
+                    if not lastseg or (lastseg.reference_end < a.reference_end):
+                        lastseg = a
+                else:
+                    if not firstseg or (firstseg.reference_start > a.reference_start):
+                        firstseg = a
+            # check FR orientation
+            try:
+                assert firstseg and lastseg
+            except Exception as e:
                 raise Exception("Reads are not in FR orientation")
+
             # get ends of read pair (add tolerance offset for finding primer)
             pair_start = firstseg.reference_start + args.tolerance + 1
             pair_end = lastseg.reference_end - args.tolerance - 1
@@ -550,14 +602,13 @@ if __name__=="__main__":
 
                 # write file if no primer overlaps and expected or super
                 if not overlaps and (args.super or expectedPrimerPair(left, rite)):
-                    # get clipped primers, return None if no sequence remains
-                    firstclipped  = primerClip(firstseg, (left, rite), gstat, args.extratrim, primermask, args.clipping)
-                    secondclipped = primerClip(lastseg,  (left, rite), gstat, args.extratrim, primermask, args.clipping)
-                    if firstclipped and secondclipped:
-                        # synchronise new mate pos
-                        firstclipped, secondclipped = sync_mate_pos(firstclipped, secondclipped)
-                        # print both sequences
-                        for alnread in [firstclipped, secondclipped]:
+                    # clip primers from read alignments, return None if no sequence remains
+                    clipped_alns = list(map(lambda a: primerClip(a, (left, rite), gstat,args.extratrim, primermask, args.clipping), alns))
+                    if all(clipped_alns):
+                        # synchronise new mate pos to primary alignments
+                        clipped_alns = sync_mate_positions(alns)
+                        # print all
+                        for alnread in clipped_alns:
                             try:
                                 outfile.write(alnread)
                             except Exception as e:
@@ -575,22 +626,13 @@ if __name__=="__main__":
                     if discfile:
                         discfile.write(firstseg)
                         discfile.write(lastseg)
-            # remove read from alignment buffer
+            
+            # remove read from alignment buffer when resolved
             del alnbuffer[aln.qname]
-        elif is_paired(aln):
-            # buffer segment
-            alnbuffer[aln.qname] = aln
-        elif not aln.mate_is_unmapped:
-            # discard not proper pair (both mapped or SingleEnd)
-            if discfile:  # no proper pair flag
-                try:
-                    aln.set_tag('af', 'notproper', replace=True)
-                except:
-                    pass
-                discfile.write(aln)
-        else:
-            raise Exception('CantDecideFilter')
 
+        # delete empty created buffer entry
+        if not len(alnbuffer[aln.qname]):
+            del alnbuffer[aln.qname]
 
         ## check buffer overflow (avoid memory usage escalation)
         if len(alnbuffer) > args.maxbuffer:
