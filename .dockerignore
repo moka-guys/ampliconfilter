@@ -1,0 +1,6 @@
+data/*
+*.bai
+*.bam
+*.fasta
+*.fa
+*.bed*
