@@ -5,5 +5,5 @@ RUN mkdir /code /sandbox /resources
 WORKDIR /code
 ADD . /code
 
-# ENTRYPOINT ["/code/ampliconfilter/ampliconFilter.py"]
+ENTRYPOINT ["/code/ampliconfilter/ampliconFilter.py"]
 
