@@ -555,24 +555,26 @@ if __name__=="__main__":
                 left, rite = (lefts[0], rites[0]) if args.super else get_matched_primer_pair(lefts,rites)
                 assert left and rite  # found a matching pair
                 assert left[0] == rite[0]  # references match
-                assert l[1] - left[3]['coords'][1] < args.primerdistance  # fwd read starts before primer 3'end or up to primerdistance after
-                assert rite[3]['coords'][0] - r[1] < args.primerdistance  # same logic for reverse primer
+                # fwd read starts before primer 3'end or up to primerdistance after
+                assert l[1] - left[3]['coords'][1] < args.primerdistance
+                # same logic for reverse primer
+                assert rite[3]['coords'][0] - r[1] < args.primerdistance
             except (ValueError, AssertionError, TypeError):
                 # no primer found or on different chromosomes
-                # tag reads with reason and write to discard file
+                # tag alignments with reason and write to discard file
                 fragment['ectopic'] += 1
                 if discfile:
                     try:
                         if left[0] == rite[0]:
-                            firstseg.set_tag('af', 'ectopic', replace=True)
-                            lastseg.set_tag('af', 'ectopic', replace=True)
+                            for a in alns:
+                                a.set_tag('af', 'ectopic', replace=True)
                         else:
-                            firstseg.set_tag('af', 'primerdistance', replace=True)
-                            lastseg.set_tag('af', 'primerdistance', replace=True)
+                            for a in alns:
+                                a.set_tag('af', 'primerdistance', replace=True)
                     except:
                         pass
-                    discfile.write(firstseg)
-                    discfile.write(lastseg)
+                    for a in alns:
+                        discfile.write(a)
             except:
                 raise
             else:
