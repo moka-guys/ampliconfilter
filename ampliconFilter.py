@@ -18,11 +18,11 @@ __email__ = "dbrawand@nhs.net"
 __status__ = "Production"
 
 import sys
-from typing import get_args
 import pysam
 import argparse
 import collections
-import datetime, time
+import datetime
+import time
 from collections import defaultdict
 from IO import bamIO
 from Segment import Segment, Segments
