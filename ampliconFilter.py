@@ -400,7 +400,7 @@ if __name__=="__main__":
     ts = time.time()
     # mandatory arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument('designfile', metavar='BEDPE', help='BEDPE file with the amplicon design')
+    parser.add_argument('designfile', help='file with the amplicon design (from Qiagen)')
     parser.add_argument('-m','--metrics', metavar='FILE', help='Metrics output', type=str)
     # I/O
     parser.add_argument('-i','--inputfile', metavar='FILE', help='inputfile (Default: SAM to STDIN)', type=str)

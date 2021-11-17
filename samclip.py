@@ -85,10 +85,9 @@ def clip_primers(args):
 
     # run samtools and capture output
     sys.stderr.write('Running ampliconclip...\n')
-    with (open(args.metrics,'w') if args.metrics else sys.stderr) as metrics_out:
-        proc = subprocess.Popen(' '.join(cmd), stdout=subprocess.PIPE, stderr=metrics_out, shell=True)
-        alignments = pysam.AlignmentFile(proc.stdout, "rb")
-    
+    p = subprocess.Popen(' '.join(cmd), stdout=subprocess.PIPE, shell=True)
+    alignments = pysam.AlignmentFile(p.stdout, "rb")
+
     # iterare over alignment and write output
     outfile = bamIO(args.outfile, 'w', True, alignments)
     buffer = []
@@ -117,8 +116,7 @@ if __name__=="__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('bedfile', metavar='BED', help='BED file of primer locations (with strand)')
     parser.add_argument('bamfile', metavar='BAM', help='BAM input file')
-    parser.add_argument('-o','--outfile', metavar='FILE', help='outputfile [STDOUT]')
-    parser.add_argument('-m','--metrics', metavar='FILE', help='Metrics output from samtools ampliconclip [STDERR]')
+    parser.add_argument('-o','--outfile', metavar='FILE', help='outputfile (STDOUT)')
     parser.add_argument('-r','--rejects', metavar='FILE', help='Rejected reads (optional)')
     args = parser.parse_args()
 
